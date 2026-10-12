@@ -104,6 +104,8 @@ import { VcsGitPlugin } from "./vcs/git.js"
 import { VerbosityPlugin } from "./verbosity.js"
 import { WarmingPlugin } from "./warming.js"
 import { WellKnownPlugin } from "../wellknown/plugin.js"
+import { EnsemblePlugin } from "./builtin/ensemble.js"
+import { DreamsPlugin } from "./builtin/dreams.js"
 
 const services = [
   Agent.Service,
@@ -267,7 +269,11 @@ const post = [
   ConfigProviderPlugin.Plugin,
   ConfigWebSearchPlugin.Plugin,
   ConfigPolicyPlugin.Plugin,
+  EnsemblePlugin.Plugin,
+  DreamsPlugin.Plugin,
 ] as const satisfies readonly InternalPlugin[]
+
+export { pre, post }
 
 // Repository config must not switch off policy enforcement or the Console connection that delivers
 // organization statements, so plugin remove operations skip these IDs.
