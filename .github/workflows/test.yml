@@ -75,7 +75,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
@@ -148,7 +148,7 @@ jobs:
         if: always()
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "26.4.0"
+          node-version: "26.12.1"
 
       - name: Verify Node build
         if: always()
@@ -199,8 +199,9 @@ jobs:
         if: env.E2E_ENABLED == 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          # Playwright 1.59 hangs while extracting Chromium with Node 24.16.
-          node-version: "24.15"
+          # Playwright 1.59 regressed while extracting Chromium on Node 24.16;
+          # stay on the hardened 24.22.1 patch instead of the floating major.
+          node-version: "24.22.1"
 
       - name: Setup Bun
         if: env.E2E_ENABLED == 'true'
