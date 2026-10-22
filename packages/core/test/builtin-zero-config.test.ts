@@ -8,6 +8,16 @@ import { PluginInternal } from "../src/plugin/internal.js"
 import { ConfigNormalize } from "../src/config/normalize.js"
 import { tmpdir } from "./fixture/tmpdir"
 
+// The bundled dreams plugin resolves its storage with os.homedir(), and Bun caches
+// that value at process start. Run through script/test.ts so the process HOME is a
+// disposable directory; otherwise a direct `bun test` could touch the real
+// ~/.config/opencode/dreams.
+if (!process.env.OPENCODE_TEST_HOME) {
+  throw new Error(
+    "Run this suite with `bun run test` from packages/core: it isolates HOME before Bun caches os.homedir()",
+  )
+}
+
 describe("Built-in Zero-Config Fallbacks", () => {
   test("ensureDreamsDirectories provisions full directory structure defensively in fresh dir", async () => {
     await using tmp = await tmpdir("dreams-zero-config-")
@@ -82,12 +92,12 @@ describe("Built-in Zero-Config Fallbacks", () => {
 
     // Execution of Dreams effect must complete gracefully within a Scope
     await expect(
-      Effect.runPromise(Effect.scoped(DreamsPlugin.effect(dummyHost))),
+      Effect.runPromise(Effect.scoped(DreamsPlugin.effect(dummyHost)) as Effect.Effect<void>),
     ).resolves.toBeUndefined()
 
     // Execution of Ensemble effect must complete gracefully within a Scope
     await expect(
-      Effect.runPromise(Effect.scoped(EnsemblePlugin.effect(dummyHost))),
+      Effect.runPromise(Effect.scoped(EnsemblePlugin.effect(dummyHost)) as Effect.Effect<void>),
     ).resolves.toBeUndefined()
   })
 

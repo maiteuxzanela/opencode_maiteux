@@ -2,10 +2,32 @@ export * as EnsemblePlugin from "./ensemble.js"
 
 import { define } from "@opencode/plugin/effect/plugin"
 import { Cause, Effect } from "effect"
+import fs from "node:fs"
+import path from "node:path"
 import { PluginPromise } from "../promise.js"
 
 const PACKAGE: string = "@maiteuxzanela/ensemble-room-lowcost"
 const DEFAULT_ID = "ensemble"
+
+type BuiltinSetup = (context: any) => void | (() => void) | Promise<void | (() => void)>
+
+/**
+ * The bundled ensemble plugin's V2 setup opens `$HOME/.config/opencode/ensemble.db`
+ * without creating the parent directory (only its V1 entry point did). A first run
+ * has no config directory yet, so the SQLite open fails and the adapter would report
+ * an active plugin with no tools. Provision the exact directory its `getDbPath()`
+ * targets before initialization.
+ */
+export function ensureEnsembleConfigDirectory(): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "~"
+  const configDir = path.join(home, ".config", "opencode")
+  try {
+    fs.mkdirSync(configDir, { recursive: true })
+  } catch {
+    // Fail-safe: read-only filesystem or permission error must never crash boot
+  }
+  return configDir
+}
 
 export const Plugin = define({
   id: DEFAULT_ID,
@@ -34,6 +56,10 @@ export const Plugin = define({
           ? mod.id
           : DEFAULT_ID
 
+      // Only provision after the package actually resolves, so a missing optional
+      // dependency never creates directories in the user's home during cold boot.
+      ensureEnsembleConfigDirectory()
+
       if ("effect" in mod && typeof mod.effect === "function") {
         yield* (mod as { effect: (c: typeof ctx) => Effect.Effect<void, unknown, any> }).effect(ctx).pipe(
           Effect.catchCause((cause) =>
@@ -44,9 +70,12 @@ export const Plugin = define({
         return
       }
 
-      const setup =
+      const setup: BuiltinSetup | null =
         "setup" in mod && typeof mod.setup === "function"
-          ? (mod.setup as (context: any) => Promise<unknown> | unknown)
+          ? async (context: any) => {
+              const result = await (mod.setup as (context: any) => unknown)(context)
+              return typeof result === "function" ? (result as () => void) : undefined
+            }
           : "server" in mod && typeof mod.server === "function"
             ? async (context: any) => {
                 const res = await (mod as any).server({

@@ -5,10 +5,13 @@ import { Cause, Effect } from "effect"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { z } from "zod/v4"
 import { PluginPromise } from "../promise.js"
 
 const PACKAGE: string = "opencode-plugin-dreams"
 const DEFAULT_ID = "opencode-plugin-dreams"
+
+type BuiltinSetup = (context: any) => void | (() => void) | Promise<void | (() => void)>
 
 export function ensureDreamsDirectories(overrideDir?: string): string {
   const dreamsDir =
@@ -27,12 +30,42 @@ export function ensureDreamsDirectories(overrideDir?: string): string {
   return dreamsDir
 }
 
+/**
+ * V1 tools declare their arguments as a Zod raw shape, while core tools require a
+ * full schema. Without this conversion the bundled tools register with an empty
+ * input schema and the model cannot pass `scope`, `fact`, `category`, or `query`.
+ */
+function toolInput(args: unknown) {
+  if (args && typeof args === "object" && ("~standard" in args || "_zod" in args)) return args
+  return z.object((args as Record<string, z.ZodType> | undefined) ?? {})
+}
+
+/**
+ * V1 tools return a string or `{ output, metadata, attachments }`, while core tools
+ * must return a `Tool.Result` object. Passing a raw string makes core's executor
+ * evaluate `"output" in result` and fail the call.
+ */
+function toolResult(result: unknown) {
+  if (typeof result === "string") return { content: result }
+  if (result && typeof result === "object") {
+    const value = result as {
+      output?: unknown
+      content?: string
+      metadata?: Record<string, unknown>
+    }
+    const content = typeof value.output === "string" ? value.output : value.content
+    return {
+      ...(content === undefined ? {} : { content }),
+      ...(value.metadata === undefined ? {} : { metadata: value.metadata }),
+    }
+  }
+  return { content: result === undefined ? "" : String(result) }
+}
+
 export const Plugin = define({
   id: DEFAULT_ID,
   effect: (ctx) =>
     Effect.gen(function* () {
-      ensureDreamsDirectories()
-
       const imported = yield* Effect.tryPromise({
         try: () => import(PACKAGE),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
@@ -51,6 +84,10 @@ export const Plugin = define({
         return
       }
 
+      // Only provision after the package actually resolves, so a missing optional
+      // dependency never creates memory directories during cold boot.
+      ensureDreamsDirectories()
+
       const id =
         "id" in mod && typeof mod.id === "string" && mod.id.trim().length > 0
           ? mod.id
@@ -66,9 +103,12 @@ export const Plugin = define({
         return
       }
 
-      const setup =
+      const setup: BuiltinSetup | null =
         "setup" in mod && typeof mod.setup === "function"
-          ? (mod.setup as (context: any) => Promise<unknown> | unknown)
+          ? async (context: any) => {
+              const result = await (mod.setup as (context: any) => unknown)(context)
+              return typeof result === "function" ? (result as () => void) : undefined
+            }
           : "server" in mod && typeof mod.server === "function"
             ? async (context: any) => {
                 const res = await (mod as any).server({
@@ -85,7 +125,9 @@ export const Plugin = define({
                           id: name,
                           name,
                           description: (def as any).description ?? "",
-                          execute: (input: any) => (def as any).execute(input),
+                          input: toolInput((def as any).args),
+                          execute: async (input: any, toolContext: any) =>
+                            toolResult(await (def as any).execute(input, toolContext)),
                         })
                       }
                     })
@@ -102,9 +144,11 @@ export const Plugin = define({
                       }
                     })
                   }
-                  if (typeof res.dispose === "function") {
-                    return () => res.dispose()
-                  }
+                  // Intentionally do not forward `res.dispose`: the package keeps one
+                  // process-global SQLite handle created at import, and closing it here
+                  // would permanently break reactivation in the same process because
+                  // the cached module never reopens it ("Cannot use a closed database").
+                  // Unloading still drops the tool registrations through the plugin scope.
                 }
               }
             : null

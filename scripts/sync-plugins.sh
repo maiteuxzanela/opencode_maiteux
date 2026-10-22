@@ -13,6 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CORE_PKG_JSON="$ROOT_DIR/packages/core/package.json"
+LOCK_FILE="$ROOT_DIR/bun.lock"
 
 ENSEMBLE_REPO="https://github.com/maiteuxzanela/ensemble-room-lowcost.git"
 DREAMS_REPO="https://github.com/maiteuxzanela/chamber_dream.git"
@@ -22,6 +23,7 @@ DREAMS_PKG_NAME="opencode-plugin-dreams"
 
 DRY_RUN=false
 CHECK_MODE=false
+CHECK_UPSTREAM=false
 ENSEMBLE_REF=""
 DREAMS_REF=""
 
@@ -31,7 +33,8 @@ Uso: $0 [opções]
 
 Opções:
   --dry-run          Inspeciona refs remotas e exibe o que seria atualizado sem modificar arquivos
-  --check            Modo auditoria/CI: verifica se package.json está alinhado com upstream (exit 0 ok, exit 1 drift)
+  --check            Auditoria de CI offline e determinística: exige refs fixadas em commit e bun.lock alinhado
+  --check-upstream   Compara as refs atuais com o HEAD remoto (requer rede; acusa drift sempre que o upstream avança)
   --ensemble <ref>   Define ref/tag/commit manual para @maiteuxzanela/ensemble-room-lowcost
   --dreams <ref>     Define ref/tag/commit manual para opencode-plugin-dreams (chamber_dream)
   -h, --help         Exibe esta mensagem de ajuda
@@ -47,6 +50,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --check)
       CHECK_MODE=true
+      shift
+      ;;
+    --check-upstream)
+      CHECK_UPSTREAM=true
       shift
       ;;
     --ensemble)
@@ -83,6 +90,52 @@ CURRENT_DREAMS=$(node -e "const p = require('$CORE_PKG_JSON'); console.log(p.dep
 
 echo "Versão atual $ENSEMBLE_PKG_NAME: ${CURRENT_ENSEMBLE:-não instalada}"
 echo "Versão atual $DREAMS_PKG_NAME: ${CURRENT_DREAMS:-não instalada}"
+
+# Modo --check (Auditoria / CI independente de rede)
+#
+# As dependências são fixadas por commit de propósito (instalação reprodutível),
+# então comparar com o HEAD remoto acusaria drift falso a cada commit do upstream.
+# A auditoria determinística verifica o que o repositório realmente controla:
+# refs fixadas em commit e bun.lock alinhado com package.json.
+check_pinned() {
+  local spec="$1"
+  local label="$2"
+  if [[ "$spec" =~ ^github:maiteuxzanela/[A-Za-z0-9._-]+#[0-9a-f]{7,40}$ ]]; then
+    return 0
+  fi
+  echo "DRIFT DETECTADO em $label: ref não fixada em commit: '${spec:-ausente}'" >&2
+  return 1
+}
+
+if [[ "$CHECK_MODE" = true ]]; then
+  echo ""
+  echo "--- Executando em modo --check (offline) ---"
+  DRIFT=false
+
+  check_pinned "$CURRENT_ENSEMBLE" "$ENSEMBLE_PKG_NAME" || DRIFT=true
+  check_pinned "$CURRENT_DREAMS" "$DREAMS_PKG_NAME" || DRIFT=true
+
+  if [[ -f "$LOCK_FILE" ]]; then
+    if [[ -n "$CURRENT_ENSEMBLE" ]] && ! grep -Fq "${CURRENT_ENSEMBLE#github:}" "$LOCK_FILE"; then
+      echo "DRIFT DETECTADO em $ENSEMBLE_PKG_NAME: bun.lock não contém '${CURRENT_ENSEMBLE#github:}'" >&2
+      DRIFT=true
+    fi
+    if [[ -n "$CURRENT_DREAMS" ]] && ! grep -Fq "${CURRENT_DREAMS#github:}" "$LOCK_FILE"; then
+      echo "DRIFT DETECTADO em $DREAMS_PKG_NAME: bun.lock não contém '${CURRENT_DREAMS#github:}'" >&2
+      DRIFT=true
+    fi
+  else
+    echo "DRIFT DETECTADO: $LOCK_FILE ausente." >&2
+    DRIFT=true
+  fi
+
+  if [[ "$DRIFT" = true ]]; then
+    echo "Status: FALHA DE AUDITORIA (pins ou bun.lock divergentes)." >&2
+    exit 1
+  fi
+  echo "Status: SUCESSO (refs fixadas em commit e bun.lock alinhado)."
+  exit 0
+fi
 
 fetch_latest_ref() {
   local repo_url="$1"
@@ -137,10 +190,10 @@ echo "Alvos calculados:"
 echo "  $ENSEMBLE_PKG_NAME -> $TARGET_ENSEMBLE_SPEC ($TARGET_ENSEMBLE_DISPLAY)"
 echo "  $DREAMS_PKG_NAME -> $TARGET_DREAMS_SPEC ($TARGET_DREAMS_DISPLAY)"
 
-# Modo --check (Auditoria / CI)
-if [[ "$CHECK_MODE" = true ]]; then
+# Modo --check-upstream (drift contra o HEAD remoto; requer rede)
+if [[ "$CHECK_UPSTREAM" = true ]]; then
   echo ""
-  echo "--- Executando em modo --check ---"
+  echo "--- Executando em modo --check-upstream ---"
   DRIFT=false
 
   # Normaliza specs para comparacao
@@ -176,10 +229,39 @@ if [[ "$DRY_RUN" = true ]]; then
   echo "     - $ENSEMBLE_PKG_NAME: '$CURRENT_ENSEMBLE' -> '$TARGET_ENSEMBLE_SPEC'"
   echo "     - $DREAMS_PKG_NAME: '$CURRENT_DREAMS' -> '$TARGET_DREAMS_SPEC'"
   echo "  2. Executar 'bun install --ignore-scripts' a partir de $ROOT_DIR"
-  echo "  3. Executar 'bun test --cwd packages/core test/builtin-zero-config.test.ts test/builtin-cold-start-offline.test.ts'"
+  echo "  3. Validar com '(cd packages/core && bun run test test/builtin-zero-config.test.ts test/builtin-cold-start-offline.test.ts)'"
   echo "  4. Manter alterações unstaged (anti-early-commit)"
   exit 0
 fi
+
+# Validação pré-voo ANTES de qualquer escrita: o estado atual precisa estar verde,
+# senão a sincronização aborta sem tocar em package.json/bun.lock.
+echo ""
+echo "--- Validação pré-voo (estado atual, antes de escrever) ---"
+(cd "$ROOT_DIR/packages/core" && bun run test test/builtin-zero-config.test.ts test/builtin-cold-start-offline.test.ts)
+
+# Backup + rollback: se install/validação falharem depois da escrita, os manifestos
+# voltam ao estado anterior em vez de deixar o repositório meio-aplicado.
+PKG_BACKUP="$(mktemp)"
+LOCK_BACKUP=""
+cp "$CORE_PKG_JSON" "$PKG_BACKUP"
+if [[ -f "$LOCK_FILE" ]]; then
+  LOCK_BACKUP="$(mktemp)"
+  cp "$LOCK_FILE" "$LOCK_BACKUP"
+fi
+
+restore_on_failure() {
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    echo "Falha após a escrita; restaurando package.json e bun.lock..." >&2
+    cp "$PKG_BACKUP" "$CORE_PKG_JSON"
+    if [[ -n "$LOCK_BACKUP" && -f "$LOCK_BACKUP" ]]; then
+      cp "$LOCK_BACKUP" "$LOCK_FILE"
+    fi
+  fi
+  rm -f "$PKG_BACKUP" "$LOCK_BACKUP"
+}
+trap restore_on_failure EXIT
 
 # Execução real da sincronização
 echo ""
@@ -201,7 +283,7 @@ echo "--- Atualizando bun.lock (bun install --ignore-scripts) ---"
 
 echo ""
 echo "--- Executando validação fail-fast de integridade (anti-mock) ---"
-(cd "$ROOT_DIR" && bun test --cwd packages/core test/builtin-zero-config.test.ts test/builtin-cold-start-offline.test.ts)
+(cd "$ROOT_DIR/packages/core" && bun run test test/builtin-zero-config.test.ts test/builtin-cold-start-offline.test.ts)
 
 echo ""
 echo "=== Sincronização concluída com sucesso! ==="
