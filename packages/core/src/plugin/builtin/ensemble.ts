@@ -53,10 +53,12 @@ function passwdHome(): string | undefined {
  * joined verbatim by `path.join`, recreating a literal `./~` folder in the cwd.
  */
 function isUsableHome(value: string | undefined): value is string {
-  // Declared as `string` (not `string | undefined`) so the tilde check below is
+  // Declared as `string` (not `string | undefined`) so `path.isAbsolute` is
   // type-safe under strictNullChecks; `Boolean(candidate)` short-circuits empties.
+  // Absolute is mandatory: `"~"`, `"~/sub"` and any other relative value would be
+  // joined verbatim and recreate a literal `./~` folder in the cwd.
   const candidate = value?.trim() ?? ""
-  return Boolean(candidate) && candidate !== "~" && !candidate.startsWith("~/")
+  return Boolean(candidate) && path.isAbsolute(candidate)
 }
 
 /**
