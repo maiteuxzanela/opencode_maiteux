@@ -13,11 +13,13 @@ runs:
   using: "composite"
   steps:
     # node-gyp@latest (invoked via bunx for native install scripts) requires Node >=22;
-    # some runner images ship an older system Node on PATH
+    # some runner images ship an older system Node on PATH.
+    # TICKET-HARNESS-89: patch exato (nunca "24" flutuante) — CVE-2026-111497,
+    # CVE-2026-106069/106072, CVE-2026-105482 só estão corrigidos no patch pinado.
     - name: Setup Node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       with:
-        node-version: "24"
+        node-version: "24.22.1"
 
     - name: Get baseline download URL
       id: bun-url

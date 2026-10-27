@@ -3,6 +3,7 @@ export * as EnsemblePlugin from "./ensemble.js"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Cause, Effect } from "effect"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { PluginPromise } from "../promise.js"
 
@@ -12,6 +13,76 @@ const DEFAULT_ID = "ensemble"
 type BuiltinSetup = (context: any) => void | (() => void) | Promise<void | (() => void)>
 
 /**
+ * `os.homedir()` prefers `$HOME` on POSIX, so a poisoned `HOME` (e.g. the literal
+ * `"~"`) leaks straight back through it. `os.userInfo().homedir` is passwd-based in
+ * Node but follows `$HOME` in Bun, so it is used only as an extra candidate.
+ */
+function safeUserInfoHome(): string | undefined {
+  try {
+    return os.userInfo().homedir
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Last-resort passwd lookup: reads the account database directly so a literal `"~"`
+ * can be expanded to the real home even in runtimes whose `os.homedir()` follows
+ * `$HOME` (Bun). Returns undefined on Windows or when the entry is unavailable.
+ */
+function passwdHome(): string | undefined {
+  if (process.platform === "win32") return undefined
+  try {
+    const uid = typeof process.getuid === "function" ? String(process.getuid()) : undefined
+    if (!uid) return undefined
+    const entry = fs
+      .readFileSync("/etc/passwd", "utf8")
+      .split("\n")
+      .find((line) => {
+        const fields = line.split(":")
+        return fields.length >= 6 && fields[2] === uid
+      })
+    return entry?.split(":")[5] || undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * A usable home is non-empty and NOT an unexpanded tilde: `"~"` / `"~/..."` would be
+ * joined verbatim by `path.join`, recreating a literal `./~` folder in the cwd.
+ */
+function isUsableHome(value: string | undefined): value is string {
+  // Declared as `string` (not `string | undefined`) so the tilde check below is
+  // type-safe under strictNullChecks; `Boolean(candidate)` short-circuits empties.
+  const candidate = value?.trim() ?? ""
+  return Boolean(candidate) && candidate !== "~" && !candidate.startsWith("~/")
+}
+
+/**
+ * Resolve the user's real home directory.
+ *
+ * `HOME` is frequently unset (Windows, systemd units, containers, sandboxes) and the
+ * previous `?? "~"` fallback made `path.join` create a literal `./~/.config/opencode`
+ * directory relative to the process cwd. A literal `"~"` is just as bad: `os.homedir()`
+ * reads `$HOME` first on POSIX (Node and Bun), so it echoes the poisoned value back.
+ * Candidates are therefore filtered and, if nothing usable remains, `/tmp` is used.
+ */
+export function resolveEnsembleHomeDirectory(): string {
+  // Declared precedence (TICKET-HARNESS-87): HOME → USERPROFILE → os.homedir() → /tmp.
+  const declared = process.env.HOME || process.env.USERPROFILE || os.homedir() || "/tmp"
+  if (isUsableHome(declared)) return declared.trim()
+
+  // `os.homedir()` and Bun's `os.userInfo()` follow `$HOME`; the passwd database is the
+  // only source that still knows the real home when the environment is poisoned.
+  for (const lookup of [safeUserInfoHome, passwdHome]) {
+    const value = lookup()
+    if (isUsableHome(value)) return value.trim()
+  }
+  return "/tmp"
+}
+
+/**
  * The bundled ensemble plugin's V2 setup opens `$HOME/.config/opencode/ensemble.db`
  * without creating the parent directory (only its V1 entry point did). A first run
  * has no config directory yet, so the SQLite open fails and the adapter would report
@@ -19,7 +90,7 @@ type BuiltinSetup = (context: any) => void | (() => void) | Promise<void | (() =
  * targets before initialization.
  */
 export function ensureEnsembleConfigDirectory(): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "~"
+  const home = resolveEnsembleHomeDirectory()
   const configDir = path.join(home, ".config", "opencode")
   try {
     fs.mkdirSync(configDir, { recursive: true })

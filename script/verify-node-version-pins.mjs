@@ -10,13 +10,22 @@
  *
  * Também confirma que o pin do Bun (`packageManager`) permaneceu intocado.
  *
+ * TICKET-HARNESS-89: os pins de Node em composite actions (action.yml sob
+ * .github/actions/) passaram de relatório informativo a check BLOQUEANTE — o setup-bun
+ * mantinha "24" flutuante e agora exige patch exato da allowlist.
+ *
  * Uso:  bun script/verify-node-version-pins.mjs
+ *       PINS_ROOT=/caminho/alternativo bun script/verify-node-version-pins.mjs
+ *       (PINS_ROOT permite apontar para uma cópia mutada da árvore nos testes
+ *        determinísticos de regressão sem tocar nos arquivos reais)
  * Exit: 0 = tudo conforme; 1 = há violação (lista no stderr).
  */
 import { readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
 
-const RAIZ = path.resolve(import.meta.dir, "..")
+const RAIZ = process.env.PINS_ROOT
+  ? path.resolve(process.env.PINS_ROOT)
+  : path.resolve(import.meta.dir, "..")
 const DIR_WORKFLOWS = path.join(RAIZ, ".github", "workflows")
 const DIR_ACOES = path.join(RAIZ, ".github", "actions")
 const PERMITIDOS = new Set(["24.22.1", "26.12.1"])
@@ -24,7 +33,6 @@ const VULNERAVEIS = new Set(["26.4.0", "24.15", "24.16"])
 const BUN_PIN = "bun@1.4.2"
 
 const falhas = []
-const avisos = []
 const ok = (cond, msg) => {
   if (!cond) falhas.push(msg)
 }
@@ -86,8 +94,11 @@ ok(totalPassos > 0, "nenhum step encontrado nos workflows")
 const pkg = JSON.parse(readFileSync(path.join(RAIZ, "package.json"), "utf8"))
 ok(pkg.packageManager === BUN_PIN, `packageManager deve continuar "${BUN_PIN}" (atual: "${pkg.packageManager}")`)
 
-// Relatório (não bloqueante) de pins de Node fora de .github/workflows: o
-// composite setup-bun mantém "24" flutuante e não é escopo do TICKET-HARNESS-79.
+// Pins de Node em composite actions (.github/actions/**/action.yml).
+// TICKET-HARNESS-89: o residual "24" flutuante do setup-bun foi pinado em
+// 24.22.1 e este bloco deixou de ser apenas relatório: agora BLOQUEIA, para
+// impedir a reintrodução de versão flutuante fora das workflows.
+const blocosAcao = []
 const acoes = readdirSync(DIR_ACOES, { withFileTypes: true })
   .filter((e) => e.isDirectory())
   .map((e) => path.join(DIR_ACOES, e.name, "action.yml"))
@@ -101,9 +112,17 @@ for (const caminho of acoes) {
   for (const linha of conteudo.split("\n")) {
     const m = /^\s*node-version:\s*["']?([^"'#\s]+)/.exec(linha)
     if (!m) continue
-    if (!PERMITIDOS.has(m[1])) {
-      avisos.push(`${path.relative(RAIZ, caminho)}: node-version "${m[1]}" (fora das workflows; residual não bloqueante)`)
-    }
+    blocosAcao.push(path.relative(RAIZ, caminho))
+    const rotulo = `${path.relative(RAIZ, caminho)}`
+    ok(
+      PERMITIDOS.has(m[1]),
+      `${rotulo}: node-version "${m[1]}" fora da allowlist endurecida (${[...PERMITIDOS].join(", ")})`
+    )
+    ok(!VULNERAVEIS.has(m[1]), `${rotulo}: node-version vulnerável "${m[1]}"`)
+    ok(
+      /^\d+\.\d+\.\d+$/.test(m[1]),
+      `${rotulo}: node-version "${m[1]}" deve ser patch exato X.Y.Z (sem pin flutuante)`
+    )
   }
 }
 
@@ -114,6 +133,5 @@ if (falhas.length > 0) {
 }
 
 console.log(
-  `OK — ${arquivos.length} workflows parseados; ${totalSetupNode} passos setup-node, todos em {${[...PERMITIDOS].join(", ")}}; ${totalPassos} steps estruturais válidos; packageManager ${BUN_PIN} intocado.`
+  `OK — ${arquivos.length} workflows parseados; ${totalSetupNode} passos setup-node, todos em {${[...PERMITIDOS].join(", ")}}; ${blocosAcao.length} pin(s) de composite action também exatos; ${totalPassos} steps estruturais válidos; packageManager ${BUN_PIN} intocado.`
 )
-for (const a of avisos) console.log(`AVISO — ${a}`)
